@@ -23,6 +23,7 @@ class TrainOptions(BaseOptions):
         self.parser.add_argument('--beta1', type=float, default=0.5, help='momentum term of adam')
         self.parser.add_argument('--lr', type=float, default=0.00005, help='initial learning rate for adam')
         self.parser.add_argument('--batch_size', type=int, default=8, help='# of samples in each batch')
+        self.parser.add_argument('--weight_decay', type=float, default=1e-4, help='value of weight decay')
 
         # for discriminators        
         self.parser.add_argument('--num_D', type=int, default=2, help='number of discriminators to use')

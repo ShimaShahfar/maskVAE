@@ -10,19 +10,20 @@ import torchvision.transforms as transforms
 
 import models.networks as networks
 from util.image_pool import ImagePool
-from util.util import mask_to_onehot
+from util.util import mask_to_onehot, batch_to_cuda
 from data.cityscapes import Cityscapes
 from options.train_options import TrainOptions
 from PIL import Image
 
 
 class LitMaskNet(pl.LightningModule):
-    def __init__(self, config):
+    def __init__(self, config,):
         super().__init__()
         self.cfg = config
         self.loss_g_weights = torch.tensor([[1, 1, 10, 10, 10, 10]])
         self.batch_size = self.cfg.batch_size
         self.dataset_path = self.cfg.dataroot
+        # self.num_wrokers = 1
         # self.device = "cuda"
 
         if self.cfg.resize_or_crop != "none" or self.cfg.isTrain is False:
@@ -201,7 +202,8 @@ class LitMaskNet(pl.LightningModule):
             loss_GB_VGG,
         )
 
-    def training_step(self, batch, batch_idx):
+    def training_step(self, batch, batch_idx, optimizer_idx):
+        # batch = batch_to_cuda(batch)
         (
             image_target,
             mask_target,
@@ -262,18 +264,18 @@ class LitMaskNet(pl.LightningModule):
         )
 
 
-        val = Cityscapes(
-            root="../../maskgan/data/cityscapes/",
-            split="val",
-            mode="fine",
-            target_type="semantic",
-            transform=None,
-            target_transform=None,
-            transforms=transform,
-        )
+        # val = Cityscapes(
+        #     root="../../maskgan/data/cityscapes/",
+        #     split="val",
+        #     mode="fine",
+        #     target_type="semantic",
+        #     transform=None,
+        #     target_transform=None,
+        #     transforms=transform,
+        # )
 
         self.train_dataset = train
-        self.val_dataset = val
+        # self.val_dataset = val
 
     def configure_optimizers(self):
         # optimizer G + B
@@ -296,26 +298,26 @@ class LitMaskNet(pl.LightningModule):
     # def training_step(self, batch, batch_idx):
     #     return self._shared_eval(batch, batch_idx, "train")
 
-    def validation_step(self, batch, batch_idx):
-        return self._shared_eval(batch, batch_idx, "val")
+    # def validation_step(self, batch, batch_idx):
+    #     return self._shared_eval(batch, batch_idx, "val")
 
-    def test_step(self, batch, batch_idx):
-        return self._shared_eval(batch, batch_idx, "test")
+    # def test_step(self, batch, batch_idx):
+    #     return self._shared_eval(batch, batch_idx, "test")
 
-    def _shared_eval(self, batch, batch_idx, prefix):
-        image, mask, image_ref, mask_ref = batch
-        outputs = self.forward(image, mask, image_ref, mask_ref)
+    # def _shared_eval(self, batch, batch_idx, prefix):
+    #     image, mask, image_ref, mask_ref = batch
+    #     outputs = self.forward(image, mask, image_ref, mask_ref)
 
-        loss = self.criterion(outputs, targets)
-        logs = {
-            f"{prefix}_{metric_name}": meter(outputs, targets)
-            for metric_name, meter in self.metrics.items()
-        }
-        logs[f"{prefix}_loss"] = loss
-        self.log_dict(logs, prog_bar=True, logger=True)
+    #     loss = self.criterion(outputs, targets)
+    #     logs = {
+    #         f"{prefix}_{metric_name}": meter(outputs, targets)
+    #         for metric_name, meter in self.metrics.items()
+    #     }
+    #     logs[f"{prefix}_loss"] = loss
+    #     self.log_dict(logs, prog_bar=True, logger=True)
 
-        results = {"loss": loss, "metrics": logs}
-        return results
+    #     results = {"loss": loss, "metrics": logs}
+    #     return results
 
     # def _aggregate_results(self, outputs):
     #     metrics = outputs[0]["metrics"].keys()
@@ -330,19 +332,19 @@ class LitMaskNet(pl.LightningModule):
         return DataLoader(
             self.train_dataset,
             batch_size=self.batch_size,
-            num_workers=self.num_wrokers,
             shuffle=True,
         )
+    # num_workers=self.num_wrokers,
 
-    def val_dataloader(self):
-        return DataLoader(
-            self.val_dataset, batch_size=self.batch_size, num_workers=self.num_wrokers, 
-        )
+    # def val_dataloader(self):
+    #     return DataLoader(
+    #         self.val_dataset, batch_size=self.batch_size, num_workers=self.num_wrokers, 
+    #     )
 
-    def test_dataloader(self):
-        return DataLoader(
-            self.test_dataset, batch_size=self.batch_size, num_workers=self.num_wrokers,
-        )
+    # def test_dataloader(self):
+    #     return DataLoader(
+    #         self.test_dataset, batch_size=self.batch_size, num_workers=self.num_wrokers,
+        # )
 
     def sample_vae(self, mask_t, mask_ref):
         z_t, latent_mu_t, latent_logvar_t = self.netVAE.get_latent_var(mask_t)
@@ -353,8 +355,10 @@ class LitMaskNet(pl.LightningModule):
 
         mask_inter = self.netVAE.decode(z_inter)
         mask_outer = self.netVAE.decode(z_outer)
-
-        return mask_inter, mask_outer
+        mask_inter = torch.argmax(mask_inter, dim=1)
+        mask_outer = torch.argmax(mask_outer, dim=1)
+        
+        return mask_inter.cuda(), mask_outer.cuda()
 
 def m_wrapper(fn, apply, **kwargs):
     def wrapper(outputs, targets):
@@ -398,14 +402,14 @@ if __name__ == "__main__":
     model = LitMaskNet(
         config,
     )
-    trainer = pl.Trainer(
-        logger=logger,
-        gpus=num_gpus,
-        num_sanity_val_steps=num_sanity_val_steps,
-        max_epochs=max_epochs,
-        flush_logs_every_n_steps=10,
-        progress_bar_refresh_rate=5,
-        weights_summary="full",
-    )
+    trainer = pl.Trainer()
+
     # callbacks=[checkpoint_callback],
+    # logger=logger,
+    # gpus=num_gpus,
+    # num_sanity_val_steps=num_sanity_val_steps,
+    # max_epochs=max_epochs,
+    # flush_logs_every_n_steps=10,
+    # progress_bar_refresh_rate=5,
+    # weights_summary="full",
     trainer.fit(model)

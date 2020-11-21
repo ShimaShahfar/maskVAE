@@ -6,7 +6,17 @@ import numpy as np
 from PIL import Image
 import numpy as np
 import os
+import torch.nn.functional as F
 
+
+def mask_to_onehot(mask):
+    mask_onehot = F.one_hot(mask.long(), num_classes=34)
+    mask_onehot = mask_onehot.permute(0, 3, 1, 2).float().contiguous()
+    return mask_onehot
+
+def batch_to_cuda(batch):
+    image_target, mask_target, image_ref, mask_ref, mask_inter, mask_outer = batch
+    return (image_target.cuda(), mask_target.cuda(), image_ref.cuda(), mask_ref.cuda(), mask_inter.cuda(), mask_outer.cuda())
 # Converts a Tensor into a Numpy array
 # |imtype|: the desired type of the converted numpy array
 def tensor2im(image_tensor, imtype=np.uint8, normalize=True):
