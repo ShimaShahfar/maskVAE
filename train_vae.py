@@ -16,8 +16,7 @@ from distributed import (get_rank, synchronize, reduce_loss_dict, reduce_sum, ge
 
 def save_sample(mask, x, batch_id, mapping):
     rev_mapping = {mapping[k]: k for k in mapping}
-    image = x.type(torch.uint8)
-    pred = torch.argmax(image, dim=1) # or e.g. pred = torch.randint(0, 19, (224, 224))
+    pred = torch.argmax(x, dim=1) # or e.g. pred = torch.randint(0, 19, (224, 224))
     pred_image = torch.zeros(3, pred.shape[1], pred.shape[2], dtype=torch.uint8)
     for i in range(pred.shape[0]):
         for k in rev_mapping:
@@ -32,8 +31,7 @@ def save_sample(mask, x, batch_id, mapping):
             )
             if batch_id == 0:
                 rev_mapping = {mapping[k]: k for k in mapping}
-                image = mask.type(torch.uint8)
-                pred = torch.argmax(image, dim=1) # or e.g. pred = torch.randint(0, 19, (224, 224))
+                pred = torch.argmax(mask, dim=1) # or e.g. pred = torch.randint(0, 19, (224, 224))
                 pred_image = torch.zeros(3, pred.shape[1], pred.shape[2], dtype=torch.uint8)
                 for i in range(pred.shape[0]):
                     for k in rev_mapping:
