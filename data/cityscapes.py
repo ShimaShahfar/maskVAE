@@ -198,14 +198,26 @@ class Cityscapes(VisionDataset):
 
         
         if self.transforms is not None:
-            image_1= self.transforms(image_1)
+            # image_1= self.transforms(image_1)
             target_1 = self.transforms(target_1)
-            image_2 = self.transforms(image_2)
+            # image_2 = self.transforms(image_2)
             target_2 = self.transforms(target_2)
-        image_1 *= 255 
+        
+        transform = transforms.Compose(
+            [
+                transforms.Resize((512, 512),interpolation=Image.NEAREST),
+                transforms.ToTensor(),
+                # transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
+            ]
+        )
+        image_1= transform(image_1)
+        image_2 = transform(image_2)
+
+
+        # image_1 *= 255 
         target_1 *= 255
         image_2 *= 255 
-        target_2 *= 255
+        # target_2 *= 255
 
         # image_1, target_1, image_2, target_2 = np.asarray(image_1), np.asarray(target_1), np.asarray(image_2), np.asarray(target_2)
         # print(image_1.shape, target_1.shape, image_2.shape, target_2.shape)

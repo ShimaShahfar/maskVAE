@@ -10,21 +10,23 @@ import torchvision.transforms as transforms
 
 import models.networks as networks
 from util.image_pool import ImagePool
-from util.util import mask_to_onehot, batch_to_cuda
+from util.util import mask_to_onehot, batch_to_cuda, combine_images
 from data.cityscapes import Cityscapes
 from options.train_options import TrainOptions
 from PIL import Image
+from skimage import img_as_ubyte, io
 
 
 class LitMaskNet(pl.LightningModule):
-    def __init__(self, config,):
+    def __init__(self):
         super().__init__()
-        self.cfg = config
-        self.loss_g_weights = torch.tensor([[1, 1, 10, 10, 10, 10]])
+        self.cfg = TrainOptions().parse()
+        self.loss_g_weights = torch.tensor([1, 1, 10, 10, 10, 10])
         self.batch_size = self.cfg.batch_size
         self.dataset_path = self.cfg.dataroot
-        # self.num_wrokers = 1
+        self.num_wrokers = 32
         # self.device = "cuda"
+        # self.fixed_noises = torch.randn((4, 1024, 1, 1)).to(device)
 
         if self.cfg.resize_or_crop != "none" or self.cfg.isTrain is False:
             # when training at full res this causes OOM
@@ -53,7 +55,7 @@ class LitMaskNet(pl.LightningModule):
             self.cfg.n_blocks_local,  # ignored
             self.cfg.norm,  # instance normalization or batch normalization
         )
-
+        self.netG = self.netG.cuda()
         # discriminator network
         if self.cfg.isTrain:
             use_sigmoid = self.cfg.lsgan is False
@@ -67,11 +69,12 @@ class LitMaskNet(pl.LightningModule):
                 self.cfg.num_D,
                 getIntermFeat=self.cfg.ganFeat_loss,
             )
-
+            self.netD = self.netD.cuda()
             netB_input_nc = self.cfg.output_nc * 2
             self.netB = networks.define_B(
                 netB_input_nc, self.cfg.output_nc, 32, 3, 3, self.cfg.norm
             )
+            self.netB = self.netB.cuda()
 
         # loss functions
         self.use_pool = self.cfg.pool_size > 0
@@ -81,6 +84,7 @@ class LitMaskNet(pl.LightningModule):
         self.criterionGAN = networks.GANLoss(
             use_lsgan=self.cfg.lsgan, 
         )
+        self.criterionGAN = self.criterionGAN.cuda()
         self.criterionFeat = torch.nn.L1Loss()
         self.criterionVGG = networks.VGGLoss(self.cfg.gpu_ids)
 
@@ -150,6 +154,7 @@ class LitMaskNet(pl.LightningModule):
     ):
         inputs_D_fake = torch.cat((mask_target, fake_image_target), dim=1)
         pred_D_fake = self.netD(inputs_D_fake)
+        # print("pred_D_fake", pred_D_fake)
         loss_G_GAN = self.criterionGAN(pred_D_fake, target_is_real=True)
 
         inputs_D_blend = torch.cat((mask_target, fake_image_blend), dim=1)
@@ -158,7 +163,9 @@ class LitMaskNet(pl.LightningModule):
 
         inputs_D_real = torch.cat((mask_target, image_target), dim=1)
         pred_real = self.netD(inputs_D_real)
-        pred_real = pred_real.detach()
+        pred_real = [[item.detach() for item in row] for row in pred_real]
+        # print("pred_real ", pred_real)
+        # pred_real = pred_real.detach()
 
         # GAN feature matching loss
         loss_G_GAN_Feat = 0
@@ -216,7 +223,7 @@ class LitMaskNet(pl.LightningModule):
             alpha,
         ) = self.forward(*batch)
 
-        (opt_g, opt_d) = self.optimizers()
+        (opt_g, opt_d) = self.configure_optimizers()
         
         loss_g = self.generator_loss(
             image_target,
@@ -228,7 +235,16 @@ class LitMaskNet(pl.LightningModule):
             fake_image_outer,
             fake_image_blend,
             )
-        loss_g = self.loss_g_weights * loss_g
+        loss_G_GAN, loss_GB_GAN,loss_G_GAN_Feat, loss_GB_GAN_Feat, loss_G_VGG, loss_GB_VGG = loss_g
+        loss_G_GAN = loss_G_GAN * self.loss_g_weights[0]
+        loss_GB_GAN = loss_GB_GAN * self.loss_g_weights[1]
+        loss_G_GAN_Feat = loss_G_GAN_Feat * self.loss_g_weights[2]
+        loss_GB_GAN_Feat = loss_GB_GAN_Feat * self.loss_g_weights[3]
+        loss_G_VGG = loss_G_VGG * self.loss_g_weights[4]
+        loss_GB_VGG = loss_GB_VGG * self.loss_g_weights[5]
+
+        loss_g = (loss_G_GAN+loss_GB_GAN+loss_G_GAN_Feat+loss_GB_GAN_Feat + loss_G_VGG + loss_GB_VGG)*0.025
+        
         self.manual_backward(loss_g, opt_g)
         self.manual_optimizer_step(opt_g)
 
@@ -239,20 +255,29 @@ class LitMaskNet(pl.LightningModule):
             fake_image_target, 
             fake_image_blend,
             )
+        loss_D_fake, loss_D_blend, loss_D_real = loss_d
+        loss_d = (loss_D_fake+ loss_D_blend + loss_D_real)*0.33
+        # print("loss_d:  ", loss_d)
         self.manual_backward(loss_d, opt_d)
         self.manual_optimizer_step(opt_d)
 
         # logging
+        self.log("d_train_loss", loss_d, on_step = True, prog_bar = True, logger = True)
+        self.log("g_train_loss", loss_g, on_step = True, prog_bar = True, logger = True)
+        
+        # losses = {'loss_d': loss_d, 'loss_g': loss_g, 'loss_D_fake':loss_D_fake, 'loss_D_blend':loss_D_blend, 'loss_D_real': loss_D_real, 'loss_G_GAN': loss_G_GAN, 'loss_GB_GAN': loss_GB_GAN,'loss_G_GAN_Feat':loss_G_GAN_Feat, 'loss_GB_GAN_Feat': loss_GB_GAN_Feat, 'loss_G_VGG':loss_G_VGG, 'loss_GB_VGG':loss_GB_VGG}
+        
+        return {'loss': loss_d}
+
 
     def setup(self, stage):
-        # train, val, test = load_datasets(self.dataset_path)
-
         transform = transforms.Compose(
             [
                 transforms.Resize((512, 512),interpolation=Image.NEAREST),
                 transforms.ToTensor(),
             ]
         )
+
         train = Cityscapes(
             root="../../maskgan/data/cityscapes/",
             split="train",
@@ -309,6 +334,7 @@ class LitMaskNet(pl.LightningModule):
     #     outputs = self.forward(image, mask, image_ref, mask_ref)
 
     #     loss = self.criterion(outputs, targets)
+        
     #     logs = {
     #         f"{prefix}_{metric_name}": meter(outputs, targets)
     #         for metric_name, meter in self.metrics.items()
@@ -318,6 +344,18 @@ class LitMaskNet(pl.LightningModule):
 
     #     results = {"loss": loss, "metrics": logs}
     #     return results
+
+    def save_samples(self, batch_idx):
+        gen_samples = generator(self.fixed_noises).cpu().detach().numpy()
+        gen_samples = gen_samples.transpose(0, 2, 3, 1)
+        gen_samples *= 0.5
+        gen_samples += 0.5
+
+        visualization = combine_images(gen_samples)
+        save_path = os.path.join(
+            experiment_dir, "visualizations", f"viz_{batch_idx}.jpg"
+        )
+        io.imsave(save_path, img_as_ubyte(visualization))
 
     # def _aggregate_results(self, outputs):
     #     metrics = outputs[0]["metrics"].keys()
@@ -333,8 +371,8 @@ class LitMaskNet(pl.LightningModule):
             self.train_dataset,
             batch_size=self.batch_size,
             shuffle=True,
+            num_workers= self.num_wrokers,
         )
-    # num_workers=self.num_wrokers,
 
     # def val_dataloader(self):
     #     return DataLoader(
@@ -390,19 +428,18 @@ if __name__ == "__main__":
     num_gpus = torch.cuda.device_count()
 
     # checkpoint_callback = pl.callbacks.ModelCheckpoint(
-    #     monitor="val_loss",
+    #     monitor="loss_d",
     #     dirpath=f"checkpoints/{experiment_name}",
     #     filename="masknet-{epoch:02d}-{val_loss:.2f}",
-    #     save_top_k=3,
+    #     save_top_k=5,
     #     mode="min",
     # )
-    logger = pl.loggers.TensorBoardLogger("logs", name=experiment_name)
+    # logger = pl.loggers.TensorBoardLogger("logs", name=experiment_name)
+
     config = TrainOptions().parse()
 
-    model = LitMaskNet(
-        config,
-    )
-    trainer = pl.Trainer()
+    model = LitMaskNet()
+    trainer = pl.Trainer(automatic_optimization=False, gpus = 1)
 
     # callbacks=[checkpoint_callback],
     # logger=logger,

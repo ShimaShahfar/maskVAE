@@ -7,7 +7,24 @@ from PIL import Image
 import numpy as np
 import os
 import torch.nn.functional as F
+import math
 
+
+def combine_images(images):
+    total, width, height, channels = images.shape
+    rows = int(math.sqrt(total))
+    cols = math.ceil(total / rows)
+    combined_image = np.zeros(
+        (height * rows, width * cols, channels), dtype=images.dtype
+        )
+
+    for index, image in enumerate(images):
+        i = index // cols
+        j = index % cols
+        combined_image[
+            width * i : width * (i + 1), height * j : height * (j + 1), :
+        ] = image
+    return combined_image
 
 def mask_to_onehot(mask):
     mask_onehot = F.one_hot(mask.long(), num_classes=34)
