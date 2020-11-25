@@ -274,7 +274,7 @@ class GlobalGenerator(nn.Module):
         )
         # label encoder
         self.enc_label = LabelEncoder(
-            5, 19, 16, 64, norm="none", activ="relu", pad_type="reflect"
+            5, 34, 16, 64, norm="none", activ="relu", pad_type="reflect"
         )
 
     def assign_adain_params(self, adain_params, model):
