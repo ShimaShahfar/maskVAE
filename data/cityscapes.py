@@ -222,7 +222,7 @@ class Cityscapes(VisionDataset):
         # image_1, target_1, image_2, target_2 = np.asarray(image_1), np.asarray(target_1), np.asarray(image_2), np.asarray(target_2)
         # print(image_1.shape, target_1.shape, image_2.shape, target_2.shape)
         
-        return image_1, target_1[0], image_2, target_2[0]
+        return image_1, target_1[0], target_2[0]
 #         return image
 
     def __len__(self):
