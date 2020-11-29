@@ -1,5 +1,6 @@
 import pytorch_lightning as pl
 import pytorch_lightning.metrics.functional as plF
+from pytorch_lightning.loggers import LightningLoggerBase
 
 import torch
 import torch.nn as nn
@@ -10,24 +11,24 @@ import torchvision.transforms as transforms
 
 import models.networks as networks
 from util.image_pool import ImagePool
-from util.util import mask_to_onehot, batch_to_cuda, combine_images
+from util.util import mask_to_onehot, batch_to_cuda, combine_images, plot_RGB
 from data.cityscapes import Cityscapes
 from options.train_options import TrainOptions
 from PIL import Image
 from skimage import img_as_ubyte, io
+import numpy as np
 
 
 class LitMaskNet(pl.LightningModule):
-    def __init__(self):
+    def __init__(self, config):
         super().__init__()
-        self.cfg = TrainOptions().parse()
-        self.loss_g_weights = torch.tensor([1, 1, 10, 10, 10, 10])
+        self.cfg = config
+        self.loss_g_weights = np.array([1.0, 1.0, 10, 10, 10, 10])
         self.loss_g_weights /= self.loss_g_weights.sum()
 
         self.batch_size = self.cfg.batch_size
         self.dataset_path = self.cfg.dataroot
         self.num_wrokers = 32
-        # self.fixed_noises = torch.randn((4, 1024, 1, 1)).to(device)
 
         if self.cfg.resize_or_crop != "none" or self.cfg.isTrain is False:
             # when training at full res this causes OOM
@@ -55,7 +56,6 @@ class LitMaskNet(pl.LightningModule):
             self.cfg.n_blocks_local,  # ignored
             self.cfg.norm,  # instance normalization or batch normalization
         )
-        self.netG = self.netG.cuda()
         # discriminator network
         if self.cfg.isTrain:
             use_sigmoid = self.cfg.lsgan is False
@@ -69,20 +69,16 @@ class LitMaskNet(pl.LightningModule):
                 self.cfg.num_D,
                 getIntermFeat=self.cfg.ganFeat_loss,
             )
-            self.netD = self.netD.cuda()
             netB_input_nc = self.cfg.output_nc * 2
             self.netB = networks.define_B(
                 netB_input_nc, self.cfg.output_nc, 32, 3, 3, self.cfg.norm
             )
-            self.netB = self.netB.cuda()
-
         # loss functions
         self.use_pool = self.cfg.pool_size > 0
         if self.cfg.pool_size > 0:
             self.fake_pool = ImagePool(self.cfg.pool_size)
 
         self.criterionGAN = networks.GANLoss(use_lsgan=self.cfg.lsgan,)
-        self.criterionGAN = self.criterionGAN.cuda()
         self.criterionFeat = torch.nn.L1Loss()
         self.criterionVGG = networks.VGGLoss(self.cfg.gpu_ids)
 
@@ -217,9 +213,9 @@ class LitMaskNet(pl.LightningModule):
             fake_image_blend,
             alpha,
         ) = self.forward(image_target, mask_target, mask_ref)
-
+        
         (opt_g, opt_d) = self.configure_optimizers()
-
+        
         loss_g_all = self.generator_loss(
             image_target,
             mask_target,
@@ -231,7 +227,8 @@ class LitMaskNet(pl.LightningModule):
             fake_image_blend,
         )
         loss_g = sum([w * l for w, l in zip(self.loss_g_weights, loss_g_all)])
-
+        
+        opt_g.zero_grad()
         self.manual_backward(loss_g, opt_g)
         self.manual_optimizer_step(opt_g)
 
@@ -239,27 +236,81 @@ class LitMaskNet(pl.LightningModule):
         loss_d_all = self.discriminator_loss(
             image_target, mask_target, fake_image_target, fake_image_blend,
         )
-        loss_d = sum(loss_d_all) / 3
-
+        loss_d = sum(loss_d_all) / len(loss_d_all)
+        
+        opt_d.zero_grad()
         self.manual_backward(loss_d, opt_d)
         self.manual_optimizer_step(opt_d)
 
         # logging
-        self.log("loss_train/D", loss_d, prog_bar=True, logger=True)
-        self.log("loss/train/G", loss_g, prog_bar=True, logger=True)
+        self.log("loss/train_D", loss_d, prog_bar=True, logger=True)
+        self.log("loss/train_G", loss_g, prog_bar=True, logger=True)
 
-        # losses = {'loss_d': loss_d, 'loss_g': loss_g, 'loss_D_fake':loss_D_fake, 'loss_D_blend':loss_D_blend, 'loss_D_real': loss_D_real, 'loss_G_GAN': loss_G_GAN, 'loss_GB_GAN': loss_GB_GAN,'loss_G_GAN_Feat':loss_G_GAN_Feat, 'loss_GB_GAN_Feat': loss_GB_GAN_Feat, 'loss_G_VGG':loss_G_VGG, 'loss_GB_VGG':loss_GB_VGG}
+        (
+            loss_G_GAN,
+            loss_GB_GAN,
+            loss_G_GAN_Feat,
+            loss_GB_GAN_Feat,
+            loss_G_VGG,
+            loss_GB_VGG,
+        ) = loss_g_all
+        loss_D_fake, loss_D_blend, loss_D_real = loss_d_all
+        losses = {
+            "loss_D_fake": loss_D_fake,
+            "loss_D_blend": loss_D_blend,
+            "loss_D_real": loss_D_real,
+            "loss_G_GAN": loss_G_GAN,
+            "loss_GB_GAN": loss_GB_GAN,
+            "loss_G_GAN_Feat": loss_G_GAN_Feat,
+            "loss_GB_GAN_Feat": loss_GB_GAN_Feat,
+            "loss_G_VGG": loss_G_VGG,
+            "loss_GB_VGG": loss_GB_VGG,
+        }
+        self.log_dict(losses, prog_bar=True, logger=True)
 
+        current_epoch = self.trainer.current_epoch
+        tensorboard = self.logger.experiment
+        if batch_idx % 25 == 0:
+            mask_target = plot_RGB(mask_target)
+            tensorboard.add_images(
+                "mask_target", mask_target, current_epoch * 750 + batch_idx
+            )
+            mask_inter = plot_RGB(mask_inter)
+            tensorboard.add_images(
+                "mask_inter", mask_inter, current_epoch * 750 + batch_idx
+            )
+            mask_outer = plot_RGB(mask_outer)
+            tensorboard.add_images(
+                "mask_outer", mask_outer, current_epoch * 750 + batch_idx
+            )
+            tensorboard.add_images(
+                "image_target",
+                (image_target + 1) * 0.5,
+                current_epoch * 750 + batch_idx,
+            )
+            tensorboard.add_images(
+                "fake_image_target",
+                (fake_image_target + 1) * 0.5,
+                current_epoch * 750 + batch_idx,
+            )
+            tensorboard.add_images(
+                "fake_image_inter",
+                (fake_image_inter + 1) * 0.5,
+                current_epoch * 750 + batch_idx,
+            )
+            tensorboard.add_images(
+                "fake_image_outer",
+                (fake_image_outer + 1) * 0.5,
+                current_epoch * 750 + batch_idx,
+            )
+            tensorboard.add_images(
+                "fake_image_blend",
+                (fake_image_blend + 1) * 0.5,
+                current_epoch * 750 + batch_idx,
+            )
         return {"loss": loss_d + loss_g}
 
     def setup(self, stage):
-        transform = transforms.Compose(
-            [
-                transforms.Resize((512, 512), interpolation=Image.NEAREST),
-                transforms.ToTensor(),
-            ]
-        )
-
         train = Cityscapes(
             root="../../maskgan/data/cityscapes/",
             split="train",
@@ -267,21 +318,21 @@ class LitMaskNet(pl.LightningModule):
             target_type="semantic",
             transform=None,
             target_transform=None,
-            transforms=transform,
+            # transforms=transform,
         )
 
-        # val = Cityscapes(
-        #     root="../../maskgan/data/cityscapes/",
-        #     split="val",
-        #     mode="fine",
-        #     target_type="semantic",
-        #     transform=None,
-        #     target_transform=None,
-        #     transforms=transform,
-        # )
+        val = Cityscapes(
+            root="../../maskgan/data/cityscapes/",
+            split="val",
+            mode="fine",
+            target_type="semantic",
+            transform=None,
+            target_transform=None,
+            # transforms=transform,
+        )
 
         self.train_dataset = train
-        # self.val_dataset = val
+        self.val_dataset = val
 
     def configure_optimizers(self):
         # optimizer G + B
@@ -301,42 +352,84 @@ class LitMaskNet(pl.LightningModule):
         )
         return optimizer_G, optimizer_D
 
-    # def training_step(self, batch, batch_idx):
-    #     return self._shared_eval(batch, batch_idx, "train")
-
-    # def validation_step(self, batch, batch_idx):
-    #     return self._shared_eval(batch, batch_idx, "val")
+    def validation_step(self, batch, batch_idx):
+        return self._shared_eval(batch, batch_idx, "val")
 
     # def test_step(self, batch, batch_idx):
     #     return self._shared_eval(batch, batch_idx, "test")
 
-    # def _shared_eval(self, batch, batch_idx, prefix):
-    #     image, mask, image_ref, mask_ref = batch
-    #     outputs = self.forward(image, mask, image_ref, mask_ref)
+    def _shared_eval(self, batch, batch_idx, prefix):
+        image, mask, mask_ref = batch
+        (
+            image_target,
+            mask_target,
+            mask_inter,
+            mask_outer,
+            fake_image_target,
+            fake_image_inter,
+            fake_image_outer,
+            fake_image_blend,
+            alpha,
+        ) = self.forward(image, mask, mask_ref)
 
-    #     loss = self.criterion(outputs, targets)
-
-    #     logs = {
-    #         f"{prefix}_{metric_name}": meter(outputs, targets)
-    #         for metric_name, meter in self.metrics.items()
-    #     }
-    #     logs[f"{prefix}_loss"] = loss
-    #     self.log_dict(logs, prog_bar=True, logger=True)
-
-    #     results = {"loss": loss, "metrics": logs}
-    #     return results
-
-    def save_samples(self, batch_idx):
-        gen_samples = generator(self.fixed_noises).cpu().detach().numpy()
-        gen_samples = gen_samples.transpose(0, 2, 3, 1)
-        gen_samples *= 0.5
-        gen_samples += 0.5
-
-        visualization = combine_images(gen_samples)
-        save_path = os.path.join(
-            experiment_dir, "visualizations", f"viz_{batch_idx}.jpg"
+        loss_g_all = self.generator_loss(
+            image_target,
+            mask_target,
+            mask_inter,
+            mask_outer,
+            fake_image_target,
+            fake_image_inter,
+            fake_image_outer,
+            fake_image_blend,
         )
-        io.imsave(save_path, img_as_ubyte(visualization))
+        loss_g = sum([w * l for w, l in zip(self.loss_g_weights, loss_g_all)])
+
+        self.log("loss/validation_G", loss_g, prog_bar=True, logger=True)
+        
+        current_batch_idx = self.global_step
+        tensorboard = self.logger.experiment
+        if current_batch_idx % 25 == 0:
+            mask_target = plot_RGB(mask_target)
+            tensorboard.add_images(
+                "mask_target/validation", mask_target, current_batch_idx
+            )
+            mask_inter = plot_RGB(mask_inter)
+            tensorboard.add_images(
+                "mask_inter/validation", mask_inter, current_batch_idx
+            )
+            mask_outer = plot_RGB(mask_outer)
+            tensorboard.add_images(
+                "mask_outer/validation", mask_outer, current_batch_idx
+            )
+            tensorboard.add_images(
+                "image_target/validation",
+                (image_target + 1) * 0.5,
+                current_batch_idx,
+            )
+            tensorboard.add_images(
+                "fake_image_target/validation",
+                (fake_image_target + 1) * 0.5,
+                current_batch_idx,
+            )
+            tensorboard.add_images(
+                "fake_image_inter/validation",
+                (fake_image_inter + 1) * 0.5,
+                current_batch_idx,
+            )
+            tensorboard.add_images(
+                "fake_image_outer/validation",
+                (fake_image_outer + 1) * 0.5,
+                current_batch_idx,
+            )
+            tensorboard.add_images(
+                "fake_image_blend/validation",
+                (fake_image_blend + 1) * 0.5,
+                current_batch_idx,
+            )
+        return {"loss": loss_g}
+
+        
+        # logs[f"{prefix}_loss"] = loss
 
     # def _aggregate_results(self, outputs):
     #     metrics = outputs[0]["metrics"].keys()
@@ -352,13 +445,15 @@ class LitMaskNet(pl.LightningModule):
             self.train_dataset,
             batch_size=self.batch_size,
             shuffle=True,
-            num_workers=self.num_wrokers,
+            # num_workers=self.num_wrokers,
         )
 
-    # def val_dataloader(self):
-    #     return DataLoader(
-    #         self.val_dataset, batch_size=self.batch_size, num_workers=self.num_wrokers,
-    #     )
+    def val_dataloader(self):
+        return DataLoader(
+            self.val_dataset, 
+            batch_size=self.batch_size, 
+            # num_workers=self.num_wrokers,
+        )
 
     # def test_dataloader(self):
     #     return DataLoader(
@@ -389,17 +484,11 @@ def m_wrapper(fn, apply, **kwargs):
 
 
 if __name__ == "__main__":
-    experiment_name = "first-try"
+    experiment_name = "maskgan-v2"
 
     dataset_path = "dataset"
     num_classes = 34
-    learning_rate = 5e-4
-    batch_size = 8
     metrics = {}
-
-    num_sanity_val_steps = 10
-    max_epochs = 40
-
     num_gpus = torch.cuda.device_count()
 
     # checkpoint_callback = pl.callbacks.ModelCheckpoint(
@@ -409,19 +498,23 @@ if __name__ == "__main__":
     #     save_top_k=5,
     #     mode="min",
     # )
-    # logger = pl.loggers.TensorBoardLogger("logs", name=experiment_name)
 
+    logger = pl.loggers.TensorBoardLogger("logs", name=experiment_name)
+    pl.utilities.seed.seed_everything(seed=1)
     config = TrainOptions().parse()
+    model = LitMaskNet(config)
 
-    model = LitMaskNet()
-    trainer = pl.Trainer(automatic_optimization=False, gpus=1)
+    PATH = "./logs/maskgan-v2/version_11/checkpoints/epoch=94-step=43035.ckpt"
+    progress_bar = pl.callbacks.ProgressBar()
+    # pl.utilities.seed.seed_everything(seed=1)
+    trainer = pl.Trainer(
+        # resume_from_checkpoint=PATH,
+        callbacks=[progress_bar],
+        logger=logger,
+        automatic_optimization=False,
+        gpus=-1,
+        accelerator='ddp',
+        deterministic = False,
+    )
 
-    # callbacks=[checkpoint_callback],
-    # logger=logger,
-    # gpus=num_gpus,
-    # num_sanity_val_steps=num_sanity_val_steps,
-    # max_epochs=max_epochs,
-    # flush_logs_every_n_steps=10,
-    # progress_bar_refresh_rate=5,
-    # weights_summary="full",
     trainer.fit(model)
