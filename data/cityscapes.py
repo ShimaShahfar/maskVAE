@@ -8,6 +8,7 @@ from torchvision.datasets.utils import extract_archive, verify_str_arg, iterable
 from torchvision.datasets.vision import VisionDataset
 import torchvision.transforms as transforms
 from PIL import Image
+import torchvision.transforms.functional as TF
 
 
 class Cityscapes(VisionDataset):
@@ -197,33 +198,40 @@ class Cityscapes(VisionDataset):
         target_2 = tuple(targets) if len(targets) > 1 else targets[0]
 
         
-        if self.transforms is not None:
-            # image_1= self.transforms(image_1)
-            target_1 = self.transforms(target_1)
-            # image_2 = self.transforms(image_2)
-            target_2 = self.transforms(target_2)
+        # if self.transforms is not None:
+        #     # image_1= self.transforms(image_1)
+        #     target_1 = self.transforms(target_1)
+        #     # image_2 = self.transforms(image_2)
+        #     target_2 = self.transforms(target_2)
         
-        transform = transforms.Compose(
+        i, j, h, w = transforms.RandomCrop.get_params(
+            image_2, output_size=(512, 512))
+
+        target_1 = TF.crop(target_1, i, j, h, w)
+        target_2 = TF.crop(target_2, i, j, h, w)
+        image_1 = TF.crop(image_1, i, j, h, w)
+
+        target_transform = transforms.Compose(
             [
-                transforms.Resize((512, 512),interpolation=Image.NEAREST),
                 transforms.ToTensor(),
-                # transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
             ]
         )
-        image_1= transform(image_1)
-        image_2 = transform(image_2)
 
+        image_transform = transforms.Compose(
+            [
+                transforms.ToTensor(),
+                transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
+            ]
+        )
 
-        # image_1 *= 255 
+        image_1= image_transform(image_1)
+        target_1 = target_transform(target_1)
+        target_2 = target_transform(target_2)
+
         target_1 *= 255
-        image_2 *= 255 
-        # target_2 *= 255
-
-        # image_1, target_1, image_2, target_2 = np.asarray(image_1), np.asarray(target_1), np.asarray(image_2), np.asarray(target_2)
-        # print(image_1.shape, target_1.shape, image_2.shape, target_2.shape)
+        target_2 *= 255
         
         return image_1, target_1[0], target_2[0]
-#         return image
 
     def __len__(self):
         return len(self.images)
